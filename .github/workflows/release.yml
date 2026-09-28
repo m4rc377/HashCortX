@@ -3,7 +3,7 @@
 #
 # PLATFORMS:
 #   • Linux x86_64:   .deb + .AppImage
-#   • Windows x64:    .exe (standalone portable, no-embeddings) + -setup.exe (NSIS installer) + .msi
+#   • Windows x64:    .exe (portable, no-embeddings) + -setup.exe (NSIS) + .msi
 #   • macOS Apple Silicon (aarch64): .dmg
 #   • macOS Intel (x86_64):          .dmg
 # ============================================================
@@ -13,28 +13,25 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
   workflow_call:
     inputs:
       tag_name:
-        description: "Tag name to release"
+        description: 'Tag name to release'
         required: true
         type: string
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Tag name (misal v2.6.0)"
+        description: 'Tag name (misal v2.6.0)'
         required: false
-        default: ""
+        default: ''
 
 concurrency:
   group: release-${{ github.ref || inputs.tag_name }}
   cancel-in-progress: true
 
 jobs:
-  # ─────────────────────────────────────────────────────────────
-  # 1. BUILD MATRIX FOR ALL OS
-  # ─────────────────────────────────────────────────────────────
   build:
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
@@ -90,7 +87,7 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target || '''' }}
+          targets: ${{ matrix.target || '' }}
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
@@ -98,7 +95,6 @@ jobs:
           workspaces: './src-tauri -> target'
           key: ${{ matrix.platform }}
 
-      # ── Linux Dependencies ───────────────────────────────────
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -112,12 +108,10 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      # ── BUILD: Linux (.deb + .AppImage) ──────────────────────
       - name: Build Linux packages
         if: matrix.platform == 'linux'
         run: npm run tauri build
 
-      # ── BUILD: Windows (Portable + Installer) ────────────────
       - name: Build Windows Portable (no-embeddings)
         if: matrix.platform == 'windows'
         shell: bash
@@ -130,12 +124,10 @@ jobs:
         if: matrix.platform == 'windows'
         run: npm run tauri build
 
-      # ── BUILD: macOS (Apple Silicon & Intel) ─────────────────
       - name: Build macOS (.dmg)
         if: startsWith(matrix.platform, 'macos')
         run: npm run tauri build -- --target ${{ matrix.target }}
 
-      # ── Collect artifacts into a staging folder ──────────────
       - name: Stage Artifacts
         shell: bash
         run: |
@@ -160,9 +152,6 @@ jobs:
           path: staged-artifacts/*
           retention-days: 1
 
-  # ─────────────────────────────────────────────────────────────
-  # 2. PUBLISH RELEASE & GENERATE BODY WITH REAL SHA256 CHECKSUMS
-  # ─────────────────────────────────────────────────────────────
   publish:
     name: Publish GitHub Release
     needs: build
@@ -185,13 +174,16 @@ jobs:
           CLEAN_VER="${TAG#v}"
           echo "version=$CLEAN_VER" >> $GITHUB_OUTPUT
 
+      - name: Checkout repository for templates
+        uses: actions/checkout@v4.2.2
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: all-artifacts
           merge-multiple: true
 
-      - name: Calculate Checksums and Generate Release Body
+      - name: Calculate Checksums and Populate Release Body
         run: |
           cd all-artifacts
           sha256sum * > SHA256SUMS.txt || true
@@ -208,144 +200,17 @@ jobs:
           MAC_ARM_HASH=$(get_hash "aarch64.*\.dmg$\|aarch64\.dmg$")
           MAC_INTEL_HASH=$(get_hash "x64.*\.dmg$\|x86_64.*\.dmg$\|x64\.dmg$")
 
-          cat << EOF_BODY > ../release_notes.md
-**HashCortx is a desktop AI workspace that runs on your own machine.** Chat with eleven providers or your own local models, run an autonomous coding agent, read your own documents, analyse financial statements, design 3D parts, and put a team of agents on one brief. No backend, no account, no telemetry. Free and MIT-licensed.
+          cd ..
+          cp .github/release-template.md release_notes.md
 
-**This release runs on Linux, Windows, and macOS.** Until now the prebuilt downloads only targeted Apple Silicon macOS and Windows x64. This release carries prebuilt packages for Debian/Ubuntu, universal Linux (AppImage), Windows (both portable and installer), and macOS (both Apple Silicon and Intel).
-
----
-
-## What else is in 2.6.0
-
-112 commits since v2.5.0. The largest part of it is **3D Forge**, which went from a demo to something that produces a file a printer or a CAD program will accept:
-
-- **Models have a real size, in millimetres**, written into every file they export.
-- **Solid geometry.** Parts are fused into one solid, a design can cut a hole through it, and a model can be hollowed to a real wall thickness.
-- **Our own STL, OBJ, 3MF and STEP writers**, rather than relying on a library to describe what the numbers mean. Writing them ourselves uncovered that every mirrored part had been exported inside out.
-- **A printability report**, in millimetres, saying whether the thing could actually be made.
-- **A build order you can rearrange**, part dimensions you can type, and holes you can cut by hand.
-- **A design can do arithmetic**, so a part that repeats is written once instead of twenty-four times.
-
-Elsewhere:
-
-- **A model that fails no longer falls back to a worse one than it should.** Candidates were ranked by family name before variant, so a failover reached for the small cheap model ahead of a genuinely large one.
-- **Money is read correctly.** A bracketed debit was being counted as money coming in.
-- **Generated dates were a day early** everywhere east of Greenwich.
-- **Every export writes a file.** Seventeen save buttons and the Python sandbox's own output wrote nothing at all, silently.
-
-The full list, including what is still open, is in the [changelog](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md).
-
----
-
-## Linux
-
-Download the package matching your distribution below:
-
-- **Debian, Ubuntu, Linux Mint, Pop!_OS:** Download the \`.deb\` package and install it:
-  \`\`\`bash
-  sudo apt install ./hashcortx_${{ steps.vars.outputs.version }}_amd64.deb
-  \`\`\`
-- **Universal Linux (Arch, Fedora, openSUSE, etc.):** Download the \`.AppImage\`, make it executable, and run it directly:
-  \`\`\`bash
-  chmod +x hashcortx_${{ steps.vars.outputs.version }}_amd64.AppImage
-  ./hashcortx_${{ steps.vars.outputs.version }}_amd64.AppImage
-  \`\`\`
-
----
-
-## Windows
-
-Choose between the standalone portable program or the full setup installer:
-
-- **Portable (No install needed, starts on any 64-bit PC):**  
-  Download **HashCortx_${{ steps.vars.outputs.version }}_x64_no-embeddings.exe** below and run it. There is nothing to install — it is the program itself, not an installer.  
-  
-  This is the build made without local embeddings, and that is deliberate. The standard build links a prebuilt ONNX Runtime compiled for processors with AVX2 — Intel from 2013, AMD from 2015 — and it is linked in such a way that its start-up code runs before the app's own. On an older processor the app cannot start at all: no window, no error, nothing on screen. The build published here has none of that code in it and starts on any 64-bit PC.
-
-  What you give up is search by meaning: the knowledge base matches on keywords instead, and the app reports that it is doing so rather than quietly returning weaker results. Everything else — the chat, the coding agent, the swarm, the file work, 3D Forge — is the same app.
-
-- **Installer (Standard setup with Start Menu integration):**  
-  Download **HashCortx_${{ steps.vars.outputs.version }}_x64-setup.exe** (or \`.msi\`) below and run the installation wizard.
-
-**Windows will show a blue "Windows protected your PC" box.** That happens for any program without a paid signing certificate. Click **More info**, then **Run anyway**. If the window opens white and empty, install the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
-
----
-
-## macOS
-
-Download the image matching your Mac processor, open it, and drag HashCortx to Applications:
-
-- **Apple Silicon (M1/M2/M3/M4):** Download \`HashCortx_${{ steps.vars.outputs.version }}_aarch64.dmg\`
-- **Intel Mac:** Download \`HashCortx_${{ steps.vars.outputs.version }}_x64.dmg\`
-
-macOS will refuse it the first time. The app is not signed by Apple and not notarised, because that needs a paid developer account, and macOS treats everything unsigned the same way. It is not damaged. Open Terminal and run this once:
-
-\`\`\`bash
-xattr -cr /Applications/HashCortx.app
-\`\`\`
-
-Then open it normally. You never have to do this again.
-
----
-
-## Check the download is the one that was published
-
-Optional, and worth doing if you care where your software came from. Run this in the folder you downloaded to; if it matches, your copy is byte-for-byte the file uploaded here.
-
-Linux:
-
-\`\`\`bash
-sha256sum hashcortx_${{ steps.vars.outputs.version }}_amd64.deb
-\`\`\`
-
-\`\`\`text
-$DEB_HASH
-\`\`\`
-
-\`\`\`bash
-sha256sum hashcortx_${{ steps.vars.outputs.version }}_amd64.AppImage
-\`\`\`
-
-\`\`\`text
-$APPIMAGE_HASH
-\`\`\`
-
-Windows (PowerShell):
-
-\`\`\`powershell
-Get-FileHash HashCortx_${{ steps.vars.outputs.version }}_x64_no-embeddings.exe -Algorithm SHA256
-\`\`\`
-
-\`\`\`text
-$WIN_PORTABLE_HASH
-\`\`\`
-
-\`\`\`powershell
-Get-FileHash HashCortx_${{ steps.vars.outputs.version }}_x64-setup.exe -Algorithm SHA256
-\`\`\`
-
-\`\`\`text
-$WIN_SETUP_HASH
-\`\`\`
-
-macOS:
-
-\`\`\`bash
-shasum -a 256 HashCortx_${{ steps.vars.outputs.version }}_aarch64.dmg
-\`\`\`
-
-\`\`\`text
-$MAC_ARM_HASH
-\`\`\`
-
-\`\`\`bash
-shasum -a 256 HashCortx_${{ steps.vars.outputs.version }}_x64.dmg
-\`\`\`
-
-\`\`\`text
-$MAC_INTEL_HASH
-\`\`\`
-EOF_BODY
+          sed -i "s|REPO_PLACEHOLDER|${{ github.repository }}|g" release_notes.md
+          sed -i "s|VERSION_PLACEHOLDER|${{ steps.vars.outputs.version }}|g" release_notes.md
+          sed -i "s|__DEB_HASH__|$DEB_HASH|g" release_notes.md
+          sed -i "s|__APPIMAGE_HASH__|$APPIMAGE_HASH|g" release_notes.md
+          sed -i "s|__WIN_PORTABLE_HASH__|$WIN_PORTABLE_HASH|g" release_notes.md
+          sed -i "s|__WIN_SETUP_HASH__|$WIN_SETUP_HASH|g" release_notes.md
+          sed -i "s|__MAC_ARM_HASH__|$MAC_ARM_HASH|g" release_notes.md
+          sed -i "s|__MAC_INTEL_HASH__|$MAC_INTEL_HASH|g" release_notes.md
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
