@@ -35,13 +35,13 @@ permissions:
 jobs:
   javascript:
     name: Frontend checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         with:
-          node-version: 20
+          node-version: 24
 
       # One step, and deliberately so. This job used to name each check
       # script in its own step, and every check written after those steps
@@ -87,7 +87,7 @@ jobs:
           - os: windows-latest
             label: Windows
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
