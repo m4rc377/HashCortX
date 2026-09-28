@@ -13,12 +13,6 @@
 #
 # INSTALL hasil .deb:
 #   sudo apt install ./hashcortx_*.deb
-#
-# CATATAN UBUNTU VERSION:
-#   Harus ubuntu-24.04 (bukan 22.04). Dependency `ort` (ONNX Runtime
-#   untuk local embeddings) butuh glibc 2.38+ dan libstdc++ 13+.
-#   Ubuntu 22.04 hanya punya glibc 2.35 → build gagal saat linking
-#   dengan error "undefined symbol". Lihat Cargo.toml untuk detail.
 # ============================================================
 
 name: Release
@@ -104,19 +98,28 @@ jobs:
             libdbus-1-dev \
             patchelf
 
-      # ── 6. Install JS dependencies (Tauri CLI + plugins) ─────
+      # ── 6. Install JS dependencies ───────────────────────────
       - name: Install npm dependencies
         run: npm install
 
-      # ── 7. Build & upload ke GitHub Release ──────────────────
-      - name: Build and upload release
-        uses: tauri-apps/tauri-action@v0
+      # ── 7. Build Tauri App secara native (.deb & .AppImage) ──
+      - name: Build Tauri App
+        run: npm run tauri build
+
+      # ── 8. Upload ke GitHub Release ──────────────────────────
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ steps.vars.outputs.tag }}
-          releaseName: "HashCortx ${{ steps.vars.outputs.tag }}"
-          releaseBody: |
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: "HashCortx ${{ steps.vars.outputs.tag }}"
+          draft: true
+          prerelease: false
+          files: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+          body: |
             ## HashCortx ${{ steps.vars.outputs.tag }}
 
             ### Install di Linux (Debian/Ubuntu)
@@ -140,5 +143,3 @@ jobs:
             ---
             Lihat [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
             untuk detail perubahan versi ini.
-          releaseDraft: true     # jadi draft dulu — publish manual setelah dicek
-          prerelease: false
