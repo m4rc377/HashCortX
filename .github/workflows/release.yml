@@ -1,0 +1,125 @@
+# ============================================================
+# HashCortx — Release Pipeline (Linux)
+#
+# TRIGGER:
+#   - Push git tag: git tag v2.6.1 && git push origin v2.6.1
+#   - Manual:       GitHub UI → tab Actions → Release → Run workflow
+#
+# OUTPUT:
+#   GitHub Release (draft) berisi:
+#     • hashcortx_<version>_amd64.deb       → install di Debian/Ubuntu
+#     • hashcortx_<version>_amd64.AppImage  → portable, tanpa install
+#
+# INSTALL hasil .deb:
+#   sudo apt install ./hashcortx_*.deb
+#
+# CATATAN UBUNTU VERSION:
+#   Harus ubuntu-24.04 (bukan 22.04). Dependency `ort` (ONNX Runtime
+#   untuk local embeddings) butuh glibc 2.38+ dan libstdc++ 13+.
+#   Ubuntu 22.04 hanya punya glibc 2.35 → build gagal saat linking
+#   dengan error "undefined symbol". Lihat Cargo.toml untuk detail.
+# ============================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'          # trigger: v2.6.0, v2.6.1, v3.0.0, dst.
+  workflow_dispatch:  # trigger manual dari tab Actions GitHub
+
+# Hanya satu release job yang jalan per tag sekaligus.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-linux:
+    name: Build Linux (.deb + .AppImage)
+    runs-on: ubuntu-24.04    # WAJIB 24.04 — glibc 2.38+ untuk ort ONNX Runtime
+    permissions:
+      contents: write        # diperlukan untuk membuat GitHub Release
+
+    steps:
+      # ── 1. Ambil source code ─────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Node.js 20 LTS ────────────────────────────────────
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # ── 3. Rust stable ───────────────────────────────────────
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # ── 4. Cache Rust artifacts (build berikutnya lebih cepat) ─
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # ── 5. System libraries Linux (wajib untuk Tauri v2) ─────
+      # Daftar lengkap sesuai ci.yml — libayatana (bukan libappindicator3,
+      # yang merupakan versi lama), libxdo dan libssl wajib ada atau
+      # crate -sys mereka gagal compile.
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            curl wget file \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            libdbus-1-dev \
+            patchelf
+
+      # ── 6. Install JS dependencies (Tauri CLI + plugins) ─────
+      - name: Install npm dependencies
+        run: npm install
+
+      # ── 7. Build & upload ke GitHub Release ──────────────────
+      # tauri-action compile Rust, bundle .deb + .AppImage,
+      # lalu upload keduanya ke GitHub Release sebagai draft.
+      # GITHUB_TOKEN sudah tersedia otomatis — tidak perlu secret tambahan.
+      - name: Build and upload release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "HashCortx ${{ github.ref_name }}"
+          releaseBody: |
+            ## HashCortx ${{ github.ref_name }}
+
+            ### Install di Linux (Debian/Ubuntu)
+
+            Download file `.deb` di bawah lalu jalankan:
+            ```bash
+            sudo apt install ./hashcortx_*.deb
+            ```
+
+            Atau gunakan `.AppImage` (portable, tidak perlu install):
+            ```bash
+            chmod +x hashcortx_*.AppImage
+            ./hashcortx_*.AppImage
+            ```
+
+            ### Catatan CPU
+            Build default menggunakan local embeddings (semantic search)
+            yang membutuhkan CPU dengan AVX2 (Intel Haswell 2013+ / AMD Excavator 2015+).
+            Jika app tidak muncul setelah diklik, CPU kamu mungkin tidak support AVX2 —
+            hubungi atau buka issue untuk build alternatif.
+
+            ---
+            Lihat [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+            untuk detail perubahan versi ini.
+          releaseDraft: true     # jadi draft dulu — publish manual setelah dicek
+          prerelease: false
