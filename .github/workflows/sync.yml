@@ -1,0 +1,87 @@
+# ============================================================
+# HashCortx — Upstream Sync & Auto-Release Pipeline
+#
+# TUJUAN:
+#   1. Sync branch `main` dari upstream (Hash-7777/HashCortX) setiap hari.
+#   2. Cek apakah upstream merilis tag baru (misal: v2.7.0).
+#   3. Jika ada tag baru, push tag ke fork & langsung trigger release.yml
+#      untuk build installer Linux (.deb + .AppImage).
+#
+# TRIGGER:
+#   - Terjadwal: Setiap hari jam 00:00 UTC (07:00 WIB)
+#   - Manual:    GitHub UI → tab Actions → Sync with Upstream → Run workflow
+# ============================================================
+
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Setiap hari jam 00:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Sync Main & Check New Tags
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      new_tag: ${{ steps.check_tags.outputs.new_tag }}
+      has_new_tag: ${{ steps.check_tags.outputs.has_new_tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add and fetch upstream
+        run: |
+          git remote add upstream https://github.com/Hash-7777/HashCortX.git || true
+          git fetch upstream --tags
+
+      - name: Merge updates from upstream main
+        run: |
+          git checkout main
+          git merge upstream/main --no-edit -m "chore(sync): merge upstream main" || {
+            echo "Conflict detected, aborting auto-merge to preserve local workflows"
+            git merge --abort
+            exit 1
+          }
+          git push origin main
+
+      - name: Check for new release tags
+        id: check_tags
+        run: |
+          # Dapatkan tag terbaru dari upstream yang diawali 'v'
+          LATEST_UPSTREAM_TAG=$(git tag -l --sort=-v:refname "v*" | head -n 1)
+          echo "Latest upstream tag found: $LATEST_UPSTREAM_TAG"
+
+          # Cek apakah tag sudah ada di remote origin fork
+          if git ls-remote --tags origin | grep -q "refs/tags/$LATEST_UPSTREAM_TAG"; then
+            echo "Tag $LATEST_UPSTREAM_TAG already exists in fork. No new release needed."
+            echo "has_new_tag=false" >> $GITHUB_OUTPUT
+          else
+            echo "New tag detected: $LATEST_UPSTREAM_TAG!"
+            echo "new_tag=$LATEST_UPSTREAM_TAG" >> $GITHUB_OUTPUT
+            echo "has_new_tag=true" >> $GITHUB_OUTPUT
+
+            # Push tag baru ke remote fork
+            git push origin "$LATEST_UPSTREAM_TAG"
+          fi
+
+  trigger-release:
+    name: Build & Release New Tag
+    needs: sync
+    if: needs.sync.outputs.has_new_tag == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag_name: ${{ needs.sync.outputs.new_tag }}
+    secrets: inherit

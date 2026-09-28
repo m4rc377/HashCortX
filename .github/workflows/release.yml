@@ -3,6 +3,7 @@
 #
 # TRIGGER:
 #   - Push git tag: git tag v2.6.1 && git push origin v2.6.1
+#   - Dipanggil oleh sync.yml (workflow_call) saat ada rilis tag baru di upstream
 #   - Manual:       GitHub UI → tab Actions → Release → Run workflow
 #
 # OUTPUT:
@@ -26,11 +27,21 @@ on:
   push:
     tags:
       - 'v*'          # trigger: v2.6.0, v2.6.1, v3.0.0, dst.
+  workflow_call:      # bisa dipanggil langsung oleh workflow sync.yml
+    inputs:
+      tag_name:
+        description: 'Tag name to release'
+        required: true
+        type: string
   workflow_dispatch:  # trigger manual dari tab Actions GitHub
+    inputs:
+      tag_name:
+        description: 'Tag name (misal v2.6.0)'
+        required: false
+        default: ''
 
-# Hanya satu release job yang jalan per tag sekaligus.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref || inputs.tag_name }}
   cancel-in-progress: true
 
 jobs:
@@ -41,12 +52,27 @@ jobs:
       contents: write        # diperlukan untuk membuat GitHub Release
 
     steps:
+      # ── 0. Tentukan Tag Release ──────────────────────────────
+      - name: Determine release tag
+        id: vars
+        run: |
+          if [ -n "${{ inputs.tag_name }}" ]; then
+            TAG="${{ inputs.tag_name }}"
+          elif [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            TAG="${github.ref_name}"
+          else
+            TAG="v2.6.0"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       # ── 1. Ambil source code ─────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ steps.vars.outputs.tag || github.ref }}
 
-      # ── 2. Node.js 20 LTS ────────────────────────────────────
-      - name: Setup Node.js 20
+      # ── 2. Node.js LTS ───────────────────────────────────────
+      - name: Setup Node.js
         uses: actions/setup-node@v4.4.0
         with:
           node-version: 24
@@ -63,9 +89,6 @@ jobs:
           workspaces: './src-tauri -> target'
 
       # ── 5. System libraries Linux (wajib untuk Tauri v2) ─────
-      # Daftar lengkap sesuai ci.yml — libayatana (bukan libappindicator3,
-      # yang merupakan versi lama), libxdo dan libssl wajib ada atau
-      # crate -sys mereka gagal compile.
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
@@ -86,18 +109,15 @@ jobs:
         run: npm install
 
       # ── 7. Build & upload ke GitHub Release ──────────────────
-      # tauri-action compile Rust, bundle .deb + .AppImage,
-      # lalu upload keduanya ke GitHub Release sebagai draft.
-      # GITHUB_TOKEN sudah tersedia otomatis — tidak perlu secret tambahan.
       - name: Build and upload release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "HashCortx ${{ github.ref_name }}"
+          tagName: ${{ steps.vars.outputs.tag }}
+          releaseName: "HashCortx ${{ steps.vars.outputs.tag }}"
           releaseBody: |
-            ## HashCortx ${{ github.ref_name }}
+            ## HashCortx ${{ steps.vars.outputs.tag }}
 
             ### Install di Linux (Debian/Ubuntu)
 
@@ -115,8 +135,7 @@ jobs:
             ### Catatan CPU
             Build default menggunakan local embeddings (semantic search)
             yang membutuhkan CPU dengan AVX2 (Intel Haswell 2013+ / AMD Excavator 2015+).
-            Jika app tidak muncul setelah diklik, CPU kamu mungkin tidak support AVX2 —
-            hubungi atau buka issue untuk build alternatif.
+            Jika app tidak muncul setelah diklik, CPU kamu mungkin tidak support AVX2.
 
             ---
             Lihat [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
