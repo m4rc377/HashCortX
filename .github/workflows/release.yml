@@ -1,18 +1,11 @@
 # ============================================================
-# HashCortx — Release Pipeline (Linux)
+# HashCortx — Multi-Platform Release Pipeline
 #
-# TRIGGER:
-#   - Push git tag: git tag v2.6.1 && git push origin v2.6.1
-#   - Dipanggil oleh sync.yml (workflow_call) saat ada rilis tag baru di upstream
-#   - Manual:       GitHub UI → tab Actions → Release → Run workflow
-#
-# OUTPUT:
-#   GitHub Release (draft) berisi:
-#     • hashcortx_<version>_amd64.deb       → install di Debian/Ubuntu
-#     • hashcortx_<version>_amd64.AppImage  → portable, tanpa install
-#
-# INSTALL hasil .deb:
-#   sudo apt install ./hashcortx_*.deb
+# PLATFORMS:
+#   • Linux x86_64:   .deb + .AppImage
+#   • Windows x64:    .exe (standalone portable, no-embeddings) + -setup.exe (NSIS installer) + .msi
+#   • macOS Apple Silicon (aarch64): .dmg
+#   • macOS Intel (x86_64):          .dmg
 # ============================================================
 
 name: Release
@@ -20,34 +13,165 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'          # trigger: v2.6.0, v2.6.1, v3.0.0, dst.
-  workflow_call:      # bisa dipanggil langsung oleh workflow sync.yml
+      - "v*"
+  workflow_call:
     inputs:
       tag_name:
-        description: 'Tag name to release'
+        description: "Tag name to release"
         required: true
         type: string
-  workflow_dispatch:  # trigger manual dari tab Actions GitHub
+  workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name (misal v2.6.0)'
+        description: "Tag name (misal v2.6.0)"
         required: false
-        default: ''
+        default: ""
 
 concurrency:
   group: release-${{ github.ref || inputs.tag_name }}
   cancel-in-progress: true
 
 jobs:
-  release-linux:
-    name: Build Linux (.deb + .AppImage)
-    runs-on: ubuntu-24.04    # WAJIB 24.04 — glibc 2.38+ untuk ort ONNX Runtime
-    permissions:
-      contents: write        # diperlukan untuk membuat GitHub Release
+  # ─────────────────────────────────────────────────────────────
+  # 1. BUILD MATRIX FOR ALL OS
+  # ─────────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: Linux x64
+            platform: linux
+
+          - os: windows-latest
+            label: Windows x64
+            platform: windows
+
+          - os: macos-latest
+            label: macOS Apple Silicon (aarch64)
+            platform: macos-arm
+            target: aarch64-apple-darwin
+
+          - os: macos-13
+            label: macOS Intel (x86_64)
+            platform: macos-intel
+            target: x86_64-apple-darwin
 
     steps:
-      # ── 0. Tentukan Tag Release ──────────────────────────────
-      - name: Determine release tag
+      - name: Determine tag
+        id: vars
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag_name }}" ]; then
+            TAG="${{ inputs.tag_name }}"
+          elif [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            TAG="${github.ref_name}"
+          else
+            TAG="v2.6.0"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          CLEAN_VER="${TAG#v}"
+          echo "version=$CLEAN_VER" >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ steps.vars.outputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target || '''' }}
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: ${{ matrix.platform }}
+
+      # ── Linux Dependencies ───────────────────────────────────
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config curl wget file \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev libdbus-1-dev patchelf
+
+      - name: Install npm dependencies
+        run: npm install
+
+      # ── BUILD: Linux (.deb + .AppImage) ──────────────────────
+      - name: Build Linux packages
+        if: matrix.platform == 'linux'
+        run: npm run tauri build
+
+      # ── BUILD: Windows (Portable + Installer) ────────────────
+      - name: Build Windows Portable (no-embeddings)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features
+          mkdir -p dist-artifacts
+          cp src-tauri/target/release/hashcortx.exe dist-artifacts/HashCortx_${{ steps.vars.outputs.version }}_x64_no-embeddings.exe
+
+      - name: Build Windows Installer (NSIS)
+        if: matrix.platform == 'windows'
+        run: npm run tauri build
+
+      # ── BUILD: macOS (Apple Silicon & Intel) ─────────────────
+      - name: Build macOS (.dmg)
+        if: startsWith(matrix.platform, 'macos')
+        run: npm run tauri build -- --target ${{ matrix.target }}
+
+      # ── Collect artifacts into a staging folder ──────────────
+      - name: Stage Artifacts
+        shell: bash
+        run: |
+          mkdir -p staged-artifacts
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            cp src-tauri/target/release/bundle/deb/*.deb staged-artifacts/ 2>/dev/null || true
+            cp src-tauri/target/release/bundle/appimage/*.AppImage staged-artifacts/ 2>/dev/null || true
+          elif [ "${{ matrix.platform }}" = "windows" ]; then
+            cp dist-artifacts/*.exe staged-artifacts/ 2>/dev/null || true
+            cp src-tauri/target/release/bundle/nsis/*.exe staged-artifacts/ 2>/dev/null || true
+            cp src-tauri/target/release/bundle/msi/*.msi staged-artifacts/ 2>/dev/null || true
+          elif [ "${{ matrix.platform }}" = "macos-arm" ]; then
+            cp src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg staged-artifacts/ 2>/dev/null || true
+          elif [ "${{ matrix.platform }}" = "macos-intel" ]; then
+            cp src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg staged-artifacts/ 2>/dev/null || true
+          fi
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.platform }}
+          path: staged-artifacts/*
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. PUBLISH RELEASE & GENERATE BODY WITH REAL SHA256 CHECKSUMS
+  # ─────────────────────────────────────────────────────────────
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Determine tag
         id: vars
         run: |
           if [ -n "${{ inputs.tag_name }}" ]; then
@@ -58,56 +182,172 @@ jobs:
             TAG="v2.6.0"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
+          CLEAN_VER="${TAG#v}"
+          echo "version=$CLEAN_VER" >> $GITHUB_OUTPUT
 
-      # ── 1. Ambil source code ─────────────────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ steps.vars.outputs.tag || github.ref }}
+          path: all-artifacts
+          merge-multiple: true
 
-      # ── 2. Node.js LTS ───────────────────────────────────────
-      - name: Setup Node.js
-        uses: actions/setup-node@v4.4.0
-        with:
-          node-version: 24
-          cache: npm
-
-      # ── 3. Rust stable ───────────────────────────────────────
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      # ── 4. Cache Rust artifacts (build berikutnya lebih cepat) ─
-      - name: Cache Rust build
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
-
-      # ── 5. System libraries Linux (wajib untuk Tauri v2) ─────
-      - name: Install Linux system dependencies
+      - name: Calculate Checksums and Generate Release Body
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            curl wget file \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libssl-dev \
-            libdbus-1-dev \
-            patchelf
+          cd all-artifacts
+          sha256sum * > SHA256SUMS.txt || true
+          cat SHA256SUMS.txt
 
-      # ── 6. Install JS dependencies ───────────────────────────
-      - name: Install npm dependencies
-        run: npm install
+          get_hash() {
+            grep -m 1 "$1" SHA256SUMS.txt | awk '{print $1}' || echo "N/A"
+          }
 
-      # ── 7. Build Tauri App secara native (.deb & .AppImage) ──
-      - name: Build Tauri App
-        run: npm run tauri build
+          DEB_HASH=$(get_hash "\.deb$")
+          APPIMAGE_HASH=$(get_hash "\.AppImage$")
+          WIN_PORTABLE_HASH=$(get_hash "_no-embeddings\.exe$")
+          WIN_SETUP_HASH=$(get_hash "-setup\.exe$")
+          MAC_ARM_HASH=$(get_hash "aarch64.*\.dmg$\|aarch64\.dmg$")
+          MAC_INTEL_HASH=$(get_hash "x64.*\.dmg$\|x86_64.*\.dmg$\|x64\.dmg$")
 
-      # ── 8. Upload ke GitHub Release ──────────────────────────
-      - name: Publish GitHub Release
+          cat << EOF_BODY > ../release_notes.md
+**HashCortx is a desktop AI workspace that runs on your own machine.** Chat with eleven providers or your own local models, run an autonomous coding agent, read your own documents, analyse financial statements, design 3D parts, and put a team of agents on one brief. No backend, no account, no telemetry. Free and MIT-licensed.
+
+**This release runs on Linux, Windows, and macOS.** Until now the prebuilt downloads only targeted Apple Silicon macOS and Windows x64. This release carries prebuilt packages for Debian/Ubuntu, universal Linux (AppImage), Windows (both portable and installer), and macOS (both Apple Silicon and Intel).
+
+---
+
+## What else is in 2.6.0
+
+112 commits since v2.5.0. The largest part of it is **3D Forge**, which went from a demo to something that produces a file a printer or a CAD program will accept:
+
+- **Models have a real size, in millimetres**, written into every file they export.
+- **Solid geometry.** Parts are fused into one solid, a design can cut a hole through it, and a model can be hollowed to a real wall thickness.
+- **Our own STL, OBJ, 3MF and STEP writers**, rather than relying on a library to describe what the numbers mean. Writing them ourselves uncovered that every mirrored part had been exported inside out.
+- **A printability report**, in millimetres, saying whether the thing could actually be made.
+- **A build order you can rearrange**, part dimensions you can type, and holes you can cut by hand.
+- **A design can do arithmetic**, so a part that repeats is written once instead of twenty-four times.
+
+Elsewhere:
+
+- **A model that fails no longer falls back to a worse one than it should.** Candidates were ranked by family name before variant, so a failover reached for the small cheap model ahead of a genuinely large one.
+- **Money is read correctly.** A bracketed debit was being counted as money coming in.
+- **Generated dates were a day early** everywhere east of Greenwich.
+- **Every export writes a file.** Seventeen save buttons and the Python sandbox's own output wrote nothing at all, silently.
+
+The full list, including what is still open, is in the [changelog](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md).
+
+---
+
+## Linux
+
+Download the package matching your distribution below:
+
+- **Debian, Ubuntu, Linux Mint, Pop!_OS:** Download the \`.deb\` package and install it:
+  \`\`\`bash
+  sudo apt install ./hashcortx_${{ steps.vars.outputs.version }}_amd64.deb
+  \`\`\`
+- **Universal Linux (Arch, Fedora, openSUSE, etc.):** Download the \`.AppImage\`, make it executable, and run it directly:
+  \`\`\`bash
+  chmod +x hashcortx_${{ steps.vars.outputs.version }}_amd64.AppImage
+  ./hashcortx_${{ steps.vars.outputs.version }}_amd64.AppImage
+  \`\`\`
+
+---
+
+## Windows
+
+Choose between the standalone portable program or the full setup installer:
+
+- **Portable (No install needed, starts on any 64-bit PC):**  
+  Download **HashCortx_${{ steps.vars.outputs.version }}_x64_no-embeddings.exe** below and run it. There is nothing to install — it is the program itself, not an installer.  
+  
+  This is the build made without local embeddings, and that is deliberate. The standard build links a prebuilt ONNX Runtime compiled for processors with AVX2 — Intel from 2013, AMD from 2015 — and it is linked in such a way that its start-up code runs before the app's own. On an older processor the app cannot start at all: no window, no error, nothing on screen. The build published here has none of that code in it and starts on any 64-bit PC.
+
+  What you give up is search by meaning: the knowledge base matches on keywords instead, and the app reports that it is doing so rather than quietly returning weaker results. Everything else — the chat, the coding agent, the swarm, the file work, 3D Forge — is the same app.
+
+- **Installer (Standard setup with Start Menu integration):**  
+  Download **HashCortx_${{ steps.vars.outputs.version }}_x64-setup.exe** (or \`.msi\`) below and run the installation wizard.
+
+**Windows will show a blue "Windows protected your PC" box.** That happens for any program without a paid signing certificate. Click **More info**, then **Run anyway**. If the window opens white and empty, install the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+
+---
+
+## macOS
+
+Download the image matching your Mac processor, open it, and drag HashCortx to Applications:
+
+- **Apple Silicon (M1/M2/M3/M4):** Download \`HashCortx_${{ steps.vars.outputs.version }}_aarch64.dmg\`
+- **Intel Mac:** Download \`HashCortx_${{ steps.vars.outputs.version }}_x64.dmg\`
+
+macOS will refuse it the first time. The app is not signed by Apple and not notarised, because that needs a paid developer account, and macOS treats everything unsigned the same way. It is not damaged. Open Terminal and run this once:
+
+\`\`\`bash
+xattr -cr /Applications/HashCortx.app
+\`\`\`
+
+Then open it normally. You never have to do this again.
+
+---
+
+## Check the download is the one that was published
+
+Optional, and worth doing if you care where your software came from. Run this in the folder you downloaded to; if it matches, your copy is byte-for-byte the file uploaded here.
+
+Linux:
+
+\`\`\`bash
+sha256sum hashcortx_${{ steps.vars.outputs.version }}_amd64.deb
+\`\`\`
+
+\`\`\`text
+$DEB_HASH
+\`\`\`
+
+\`\`\`bash
+sha256sum hashcortx_${{ steps.vars.outputs.version }}_amd64.AppImage
+\`\`\`
+
+\`\`\`text
+$APPIMAGE_HASH
+\`\`\`
+
+Windows (PowerShell):
+
+\`\`\`powershell
+Get-FileHash HashCortx_${{ steps.vars.outputs.version }}_x64_no-embeddings.exe -Algorithm SHA256
+\`\`\`
+
+\`\`\`text
+$WIN_PORTABLE_HASH
+\`\`\`
+
+\`\`\`powershell
+Get-FileHash HashCortx_${{ steps.vars.outputs.version }}_x64-setup.exe -Algorithm SHA256
+\`\`\`
+
+\`\`\`text
+$WIN_SETUP_HASH
+\`\`\`
+
+macOS:
+
+\`\`\`bash
+shasum -a 256 HashCortx_${{ steps.vars.outputs.version }}_aarch64.dmg
+\`\`\`
+
+\`\`\`text
+$MAC_ARM_HASH
+\`\`\`
+
+\`\`\`bash
+shasum -a 256 HashCortx_${{ steps.vars.outputs.version }}_x64.dmg
+\`\`\`
+
+\`\`\`text
+$MAC_INTEL_HASH
+\`\`\`
+EOF_BODY
+
+      - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -116,30 +356,5 @@ jobs:
           name: "HashCortx ${{ steps.vars.outputs.tag }}"
           draft: true
           prerelease: false
-          files: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
-          body: |
-            ## HashCortx ${{ steps.vars.outputs.tag }}
-
-            ### Install di Linux (Debian/Ubuntu)
-
-            Download file `.deb` di bawah lalu jalankan:
-            ```bash
-            sudo apt install ./hashcortx_*.deb
-            ```
-
-            Atau gunakan `.AppImage` (portable, tidak perlu install):
-            ```bash
-            chmod +x hashcortx_*.AppImage
-            ./hashcortx_*.AppImage
-            ```
-
-            ### Catatan CPU
-            Build default menggunakan local embeddings (semantic search)
-            yang membutuhkan CPU dengan AVX2 (Intel Haswell 2013+ / AMD Excavator 2015+).
-            Jika app tidak muncul setelah diklik, CPU kamu mungkin tidak support AVX2.
-
-            ---
-            Lihat [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
-            untuk detail perubahan versi ini.
+          body_path: release_notes.md
+          files: all-artifacts/*
